@@ -22,9 +22,8 @@ the vector whose i'th element is P(Y=i|x).
   y_{pred} = argmax_i P(Y=i|x,W,b)
 
 
-This tutorial presents a stochastic gradient descent optimization method
-suitable for large datasets, and a conjugate gradient optimization method
-that is suitable for smaller datasets.
+This tutorial presents a conjugate gradient optimization method that is
+suitable for smaller datasets.
 
 
 References:
@@ -37,16 +36,16 @@ References:
 __docformat__ = 'restructedtext en'
 
 
-import cPickle
-import gzip
 import os
 import sys
-import time
+import timeit
 
 import numpy
 
 import theano
 import theano.tensor as T
+
+from logistic_sgd import load_data
 
 
 class LogisticRegression(object):
@@ -78,10 +77,14 @@ class LogisticRegression(object):
         # initialize theta = (W,b) with 0s; W gets the shape (n_in, n_out),
         # while b is a vector of n_out elements, making theta a vector of
         # n_in*n_out + n_out elements
-        self.theta = theano.shared(value=numpy.zeros(n_in * n_out + n_out,
-                                                   dtype=theano.config.floatX),
-                                   name='theta',
-                                   borrow=True)
+        self.theta = theano.shared(
+            value=numpy.zeros(
+                n_in * n_out + n_out,
+                dtype=theano.config.floatX
+            ),
+            name='theta',
+            borrow=True
+        )
         # W is represented by the fisr n_in*n_out elements of theta
         self.W = self.theta[0:n_in * n_out].reshape((n_in, n_out))
         # b is the rest (last n_out elements)
@@ -94,6 +97,9 @@ class LogisticRegression(object):
         # symbolic form
         self.y_pred = T.argmax(self.p_y_given_x, axis=1)
 
+        # keep track of model input
+        self.input = input
+
     def negative_log_likelihood(self, y):
         """Return the negative log-likelihood of the prediction of this model
         under a given target distribution.
@@ -101,8 +107,9 @@ class LogisticRegression(object):
         .. math::
 
             \frac{1}{|\mathcal{D}|}\mathcal{L} (\theta=\{W,b\}, \mathcal{D}) =
-            \frac{1}{|\mathcal{D}|}\sum_{i=0}^{|\mathcal{D}|} \log(P(Y=y^{(i)}|x^{(i)}, W,b)) \\
-                \ell (\theta=\{W,b\}, \mathcal{D})
+            \frac{1}{|\mathcal{D}|}\sum_{i=0}^{|\mathcal{D}|}
+                \log(P(Y=y^{(i)}|x^{(i)}, W,b)) \\
+            \ell (\theta=\{W,b\}, \mathcal{D})
 
         :type y: theano.tensor.TensorType
         :param y: corresponds to a vector that gives for each example the
@@ -121,8 +128,10 @@ class LogisticRegression(object):
 
         # check if y has same dimension of y_pred
         if y.ndim != self.y_pred.ndim:
-            raise TypeError('y should have the same shape as self.y_pred',
-                ('y', target.type, 'y_pred', self.y_pred.type))
+            raise TypeError(
+                'y should have the same shape as self.y_pred',
+                ('y', y.type, 'y_pred', self.y_pred.type)
+            )
         # check if y is of the correct datatype
         if y.dtype.startswith('int'):
             # the T.neq operator returns a vector of 0s and 1s, where 1
@@ -132,7 +141,7 @@ class LogisticRegression(object):
             raise NotImplementedError()
 
 
-def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='../data/mnist.pkl.gz'):
+def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='mnist.pkl.gz'):
     """Demonstrate conjugate gradient optimization of a log-linear model
 
     This is demonstrated on MNIST.
@@ -148,41 +157,11 @@ def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='../data/mnist.pkl.gz'):
     #############
     # LOAD DATA #
     #############
-    print '... loading data'
+    datasets = load_data(mnist_pkl_gz)
 
-    # Load the dataset
-    f = gzip.open(mnist_pkl_gz, 'rb')
-    train_set, valid_set, test_set = cPickle.load(f)
-    f.close()
-
-    def shared_dataset(data_xy, borrow=True):
-        """ Function that loads the dataset into shared variables
-
-        The reason we store our dataset in shared variables is to allow
-        Theano to copy it into the GPU memory (when code is run on GPU).
-        Since copying data into the GPU is slow, copying a minibatch everytime
-        is needed (the default behaviour if the data is not in a shared
-        variable) would lead to a large decrease in performance.
-        """
-        data_x, data_y = data_xy
-        shared_x = theano.shared(numpy.asarray(data_x,
-                                               dtype=theano.config.floatX),
-                                 borrow=borrow)
-        shared_y = theano.shared(numpy.asarray(data_y,
-                                               dtype=theano.config.floatX),
-                                 borrow=borrow)
-        # When storing data on the GPU it has to be stored as floats
-        # therefore we will store the labels as ``floatX`` as well
-        # (``shared_y`` does exactly that). But during our computations
-        # we need them as ints (we use labels as index, and if they are
-        # floats it doesn't make sense) therefore instead of returning
-        # ``shared_y`` we will have to cast it to int. This little hack
-        # lets ous get around this issue
-        return shared_x, T.cast(shared_y, 'int32')
-
-    test_set_x, test_set_y = shared_dataset(test_set)
-    valid_set_x, valid_set_y = shared_dataset(valid_set)
-    train_set_x, train_set_y = shared_dataset(train_set)
+    train_set_x, train_set_y = datasets[0]
+    valid_set_x, valid_set_y = datasets[1]
+    test_set_x, test_set_y = datasets[2]
 
     batch_size = 600    # size of the minibatch
 
@@ -190,7 +169,6 @@ def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='../data/mnist.pkl.gz'):
     n_valid_batches = valid_set_x.get_value(borrow=True).shape[0] / batch_size
     n_test_batches = test_set_x.get_value(borrow=True).shape[0] / batch_size
 
-    ishape = (28, 28)  # this is the size of MNIST images
     n_in = 28 * 28  # number of input units
     n_out = 10  # number of output units
 
@@ -214,39 +192,48 @@ def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='../data/mnist.pkl.gz'):
 
     # compile a theano function that computes the mistakes that are made by
     # the model on a minibatch
-    test_model = theano.function([minibatch_offset], classifier.errors(y),
-            givens={
-                x: test_set_x[minibatch_offset:minibatch_offset + batch_size],
-                y: test_set_y[minibatch_offset:minibatch_offset + batch_size]},
-            name="test")
+    test_model = theano.function(
+        [minibatch_offset],
+        classifier.errors(y),
+        givens={
+            x: test_set_x[minibatch_offset:minibatch_offset + batch_size],
+            y: test_set_y[minibatch_offset:minibatch_offset + batch_size]
+        },
+        name="test"
+    )
 
-    validate_model = theano.function([minibatch_offset], classifier.errors(y),
-            givens={
-                x: valid_set_x[minibatch_offset:
-                               minibatch_offset + batch_size],
-                y: valid_set_y[minibatch_offset:
-                               minibatch_offset + batch_size]},
-            name="validate")
+    validate_model = theano.function(
+        [minibatch_offset],
+        classifier.errors(y),
+        givens={
+            x: valid_set_x[minibatch_offset: minibatch_offset + batch_size],
+            y: valid_set_y[minibatch_offset: minibatch_offset + batch_size]
+        },
+        name="validate"
+    )
 
-    #  compile a thenao function that returns the cost of a minibatch
-    batch_cost = theano.function([minibatch_offset], cost,
-            givens={
-                x: train_set_x[minibatch_offset:
-                               minibatch_offset + batch_size],
-                y: train_set_y[minibatch_offset:
-                               minibatch_offset + batch_size]},
-            name="batch_cost")
+    #  compile a theano function that returns the cost of a minibatch
+    batch_cost = theano.function(
+        [minibatch_offset],
+        cost,
+        givens={
+            x: train_set_x[minibatch_offset: minibatch_offset + batch_size],
+            y: train_set_y[minibatch_offset: minibatch_offset + batch_size]
+        },
+        name="batch_cost"
+    )
 
     # compile a theano function that returns the gradient of the minibatch
     # with respect to theta
-    batch_grad = theano.function([minibatch_offset],
-                                 T.grad(cost, classifier.theta),
-                                 givens={
-                                     x: train_set_x[minibatch_offset:
-                                            minibatch_offset + batch_size],
-                                     y: train_set_y[minibatch_offset:
-                                            minibatch_offset + batch_size]},
-            name="batch_grad")
+    batch_grad = theano.function(
+        [minibatch_offset],
+        T.grad(cost, classifier.theta),
+        givens={
+            x: train_set_x[minibatch_offset: minibatch_offset + batch_size],
+            y: train_set_y[minibatch_offset: minibatch_offset + batch_size]
+        },
+        name="batch_grad"
+    )
 
     # creates a function that computes the average cost on the training set
     def train_fn(theta_value):
@@ -291,18 +278,23 @@ def cg_optimization_mnist(n_epochs=50, mnist_pkl_gz='../data/mnist.pkl.gz'):
     # using scipy conjugate gradient optimizer
     import scipy.optimize
     print ("Optimizing using scipy.optimize.fmin_cg...")
-    start_time = time.clock()
+    start_time = timeit.default_timer()
     best_w_b = scipy.optimize.fmin_cg(
-               f=train_fn,
-               x0=numpy.zeros((n_in + 1) * n_out, dtype=x.dtype),
-               fprime=train_fn_grad,
-               callback=callback,
-               disp=0,
-               maxiter=n_epochs)
-    end_time = time.clock()
-    print(('Optimization complete with best validation score of %f %%, with '
-          'test performance %f %%') %
-               (validation_scores[0] * 100., validation_scores[1] * 100.))
+        f=train_fn,
+        x0=numpy.zeros((n_in + 1) * n_out, dtype=x.dtype),
+        fprime=train_fn_grad,
+        callback=callback,
+        disp=0,
+        maxiter=n_epochs
+    )
+    end_time = timeit.default_timer()
+    print(
+        (
+            'Optimization complete with best validation score of %f %%, with '
+            'test performance %f %%'
+        )
+        % (validation_scores[0] * 100., validation_scores[1] * 100.)
+    )
 
     print >> sys.stderr, ('The code for file ' +
                           os.path.split(__file__)[1] +
